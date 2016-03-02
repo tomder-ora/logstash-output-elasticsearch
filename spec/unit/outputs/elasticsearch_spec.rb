@@ -139,15 +139,8 @@ describe "outputs/elasticsearch" do
       expect(eso.logger).to receive(:error).with(/Attempted to send a bulk request/, anything)
     end
 
-    after do
-      listener[0].close
-      # Stop the receive buffer, but don't flush because that would hang forever in this case since ES never returns a result
-      eso.instance_variable_get(:@buffer).stop(false,false)
-      eso.close
-    end
-
     it "should fail after the timeout" do
-      Thread.new { eso.receive(LogStash::Event.new) }
+      Thread.new { eso.multi_receive([LogStash::Event.new]) }
 
       # Allow the timeout to occur.
       sleep(options["timeout"] + 0.5)
@@ -221,6 +214,24 @@ describe "outputs/elasticsearch" do
       it "should interpolate the requested action value when creating an event_action_tuple" do
         action, params, event_data = eso.event_action_tuple(event)
         expect(params).to include({:_retry_on_conflict => num_retries})
+      end
+    end
+  end
+
+  describe "sleep interval calculation" do
+    let(:retry_max_interval) { 64 }
+    subject(:eso) { LogStash::Outputs::ElasticSearch.new("retry_max_interval" => retry_max_interval) }
+
+    it "should double the given value" do
+      expect(eso.next_sleep_interval(2)).to eql(4)
+      expect(eso.next_sleep_interval(32)).to eql(64)
+    end
+
+    it "should not increase the value past the max retry interval" do
+      sleep_interval = 2
+      100.times do
+        sleep_interval = eso.next_sleep_interval(sleep_interval)
+        expect(sleep_interval).to be <= retry_max_interval
       end
     end
   end

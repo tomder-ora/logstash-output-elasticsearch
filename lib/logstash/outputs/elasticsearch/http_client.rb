@@ -1,12 +1,12 @@
 require "logstash/outputs/elasticsearch"
 require "cabin"
 require "base64"
-require "elasticsearch"
-require "elasticsearch/transport/transport/http/manticore"
+require 'logstash/outputs/elasticsearch/http_client/pool'
+require 'logstash/outputs/elasticsearch/http_client/manticore_adapter'
 
 module LogStash; module Outputs; class ElasticSearch;
   class HttpClient
-    attr_reader :client, :options, :client_options, :sniffer_thread
+    attr_reader :client, :options, :client_options, :sniffer_thread, :logger
     # This is here in case we use DEFAULT_OPTIONS in the future
     # DEFAULT_OPTIONS = {
     #   :setting => value
@@ -17,25 +17,21 @@ module LogStash; module Outputs; class ElasticSearch;
       # Again, in case we use DEFAULT_OPTIONS in the future, uncomment this.
       # @options = DEFAULT_OPTIONS.merge(options)
       @options = options
-      @client = build_client(@options)
+      @pool = build_pool(@options)
       # mutex to prevent requests and sniffing to access the
       # connection pool at the same time
-      @request_mutex = Mutex.new
-      start_sniffing!
     end
 
     def template_install(name, template, force=false)
-      @request_mutex.synchronize do
-        if template_exists?(name) && !force
-          @logger.debug("Found existing Elasticsearch template. Skipping template management", :name => name)
-          return
-        end
-        template_put(name, template)
+      if template_exists?(name) && !force
+        @logger.debug("Found existing Elasticsearch template. Skipping template management", :name => name)
+        return
       end
+      template_put(name, template)
     end
 
     def bulk(actions)
-      @request_mutex.synchronize { non_threadsafe_bulk(actions) }
+      non_threadsafe_bulk(actions)
     end
 
     def non_threadsafe_bulk(actions)
@@ -48,40 +44,22 @@ module LogStash; module Outputs; class ElasticSearch;
         else
           next { action => args }
         end
-      end.flatten
-
-      @client.bulk(:body => bulk_body)
-    end
-
-    def start_sniffing!
-      if options[:sniffing]
-        @sniffer_thread = Thread.new do
-          loop do
-            @request_mutex.synchronize { sniff! }
-            sleep (options[:sniffing_delay].to_f || 30)
-          end
-        end
+      end.
+      flatten.
+      reduce("") do |acc,line|
+        acc << LogStash::Json.dump(line)
+        acc << "\n"
       end
+
+      @pool.post("_bulk", nil, bulk_body)
     end
 
-    def stop_sniffing!
-      @sniffer_thread.kill() if @sniffer_thread
-    end
-
-    def sniff!
-      client.transport.reload_connections! if options[:sniffing]
-      hosts_by_name = client.transport.hosts.map {|h| h["name"]}.sort
-      @logger.debug({"count" => hosts_by_name.count, "hosts" => hosts_by_name})
-    rescue StandardError => e
-      @logger.error("Error while sniffing connection",
-                    :message => e.message,
-                    :class => e.class.name,
-                    :backtrace => e.backtrace)
+    def close
+      @pool.close
     end
 
     private
 
-    # Builds a client and returns an Elasticsearch::Client
     #
     # The `options` is a hash where the following symbol keys have meaning:
     #
@@ -100,7 +78,7 @@ module LogStash; module Outputs; class ElasticSearch;
     # * `:path` - String. The leading path for prefixing Elasticsearch
     #   requests. This is sometimes used if you are proxying Elasticsearch access
     #   through a special http path, such as using mod_rewrite.
-    def build_client(options)
+    def build_pool(options)
       hosts = options[:hosts] || ["127.0.0.1"]
       client_settings = options[:client_settings] || {}
       timeout = options[:timeout] || 0
@@ -108,25 +86,35 @@ module LogStash; module Outputs; class ElasticSearch;
       host_ssl_opt = client_settings[:ssl].nil? ? nil : client_settings[:ssl][:enabled]
       urls = hosts.map {|host| host_to_url(host, host_ssl_opt, client_settings[:path])}
 
-      @client_options = {
-        :hosts => urls,
-        :ssl => client_settings[:ssl],
-        :transport_options => {
-          :socket_timeout => timeout,
-          :request_timeout => timeout,
-          :proxy => client_settings[:proxy]
-        },
-        :transport_class => ::Elasticsearch::Transport::Transport::HTTP::Manticore
+      adapter_options = {
+        :socket_timeout => timeout,
+        :request_timeout => timeout,
+        :pool_max => client_settings[:pool_max],
+        :pool_max_per_route => client_settings[:pool_max_per_route],
+        :proxy => client_settings[:proxy]
       }
 
-      if options[:user] && options[:password] then
-        token = Base64.strict_encode64(options[:user] + ":" + options[:password])
-        @client_options[:headers] = { "Authorization" => "Basic #{token}" }
+      adapter_options[:ssl] = client_settings[:ssl] if client_settings[:ssl]
+
+      if options[:user]
+        adapter_options[:auth] = {
+          :user => options[:user],
+          :password => options[:password],
+          :eager => true
+        }
       end
 
-      @logger.debug? && @logger.debug("Elasticsearch HTTP client options", client_options)
+      adapter_class = ::LogStash::Outputs::ElasticSearch::HttpClient::ManticoreAdapter
+      adapter = adapter_class.new(@logger, adapter_options)
 
-      Elasticsearch::Client.new(client_options)
+      pool_options = {
+        :sniffing => options[:sniffing],
+        :sniffer_delay => options[:sniffer_delay],
+        :healthcheck_path => options[:healthcheck_path],
+      }
+
+      pool_class = ::LogStash::Outputs::ElasticSearch::HttpClient::Pool
+      pool_class.new(@logger, adapter, urls, pool_options)
     end
 
     HOSTNAME_PORT_REGEX=/\A(?<hostname>([A-Za-z0-9\.\-]+)|\[[0-9A-Fa-f\:]+\])(:(?<port>\d+))?\Z/
@@ -183,18 +171,22 @@ module LogStash; module Outputs; class ElasticSearch;
           "this may be logged to disk thus leaking credentials. Use the 'user' and 'password' options respectively"
       end
 
-      url.to_s
+      url
     end
 
     def template_exists?(name)
-      @client.indices.get_template(:name => name)
-      return true
-    rescue Elasticsearch::Transport::Transport::Errors::NotFound
-      return false
+      url, response = @pool.head("/_template/#{name}")
+      true
+    rescue LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseError => e
+      if e.code == 404
+        false
+      else
+        raise e
+      end
     end
 
     def template_put(name, template)
-      @client.indices.put_template(:name => name, :body => template)
+      @pool.put("_template/#{name}", nil, LogStash::Json.dump(template))
     end
 
     # Build a bulk item for an elasticsearch update action

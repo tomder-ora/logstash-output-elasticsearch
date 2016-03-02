@@ -1,13 +1,20 @@
 module LogStash; module Outputs; class ElasticSearch;
   module HttpClientBuilder
     def self.build(logger, hosts, params)
-      client_settings = {}
+      client_settings = {
+        :pool_max => params["pool_max"],
+        :pool_max_per_route => params["pool_max_per_route"]
+      }
 
       common_options = {
         :client_settings => client_settings,
-        :sniffing => params["sniffing"],
-        :sniffing_delay => params["sniffing_delay"]
+        :healthcheck_path => params["healthcheck_path"]
       }
+
+      if params["sniffing"]
+        common_options[:sniffing] = true
+        common_options[:sniffer_delay] = params["sniffing__delay"]
+      end
 
       common_options[:timeout] = params["timeout"] if params["timeout"]
       client_settings[:path] = "/#{params["path"]}/".gsub(/\/+/, "/") # Normalize slashes

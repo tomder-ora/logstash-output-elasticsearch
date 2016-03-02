@@ -1,6 +1,5 @@
 require_relative "../../../spec/es_spec_helper"
 require 'stud/temporary'
-require 'elasticsearch'
 require "logstash/outputs/elasticsearch"
 
 describe "Proxy option" do
