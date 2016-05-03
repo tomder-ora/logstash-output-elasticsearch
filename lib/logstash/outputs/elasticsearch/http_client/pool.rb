@@ -1,6 +1,5 @@
 module LogStash; module Outputs; class ElasticSearch; class HttpClient;
   class Pool
-    class BadResponseError < Error; end
     class NoConnectionAvailableError < Error; end
     class HostUnreachableError < Error;
       attr_reader :original_error, :url
@@ -14,22 +13,7 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
         "[#{original_error.class}] #{original_error.message}"
       end
     end
-
-    class BadResponseError < Error;
-      attr_reader :code, :uri, :body, :response
-
-      def initialize(response)
-        @code = response.code
-        @uri = response.request.uri
-        @body = response.body
-        @response = response
-      end
-
-      def message
-        "Received HTTP code #{@code} while retrieving #{@uri} with body: #{@body}"
-      end
-    end
-
+    
     attr_reader :logger
 
     DEFAULT_OPTIONS = {
@@ -75,7 +59,7 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
     def close
       @state_mutex.synchronize { @stopping = true }
 
-      logger.debug  "Stopping resurrectionist"
+      logger.debug  "Stopping sniffer"
       stop_sniffer
 
       logger.debug  "Stopping resurrectionist"
@@ -124,9 +108,15 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
       end
     end
 
+    # Sniffs the cluster then updates the internal URLs
+    def sniff!
+      update_urls(check_sniff)
+    end
+
     ES1_SNIFF_RE_URL  = /\[([^\/]*)?\/?([^:]*):([0-9]+)\]/
     ES2_SNIFF_RE_URL  = /([^\/]*)?\/?([^:]*):([0-9]+)/
-    def sniff!
+    # Sniffs and returns the results. Does not update internal URLs!
+    def check_sniff
       resp = perform_request('GET', '_nodes')
       parsed = LogStash::Json.load(resp.body)
       parsed['nodes'].map do |id,info|
@@ -173,7 +163,7 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
       @state_mutex.synchronize { @url_info.select {|url,meta| meta[:dead] } }.each do |url,meta|
         begin
           @logger.info("Checking url #{url} with path #{@healthcheck_path} to see if node resurrected")
-          perform_request_to_url(url, "GET", @healthcheck_path)
+          perform_request_to_url(url, "HEAD", @healthcheck_path)
           # If no exception was raised it must have succeeded!
           logger.warn("Resurrected connection to dead ES instance at #{url}")
           @state_mutex.synchronize { meta[:dead] = false }
@@ -190,9 +180,6 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
     def perform_request(method, path, params={}, body=nil)
       with_connection do |url|
         resp = perform_request_to_url(url, method, path, params, body)
-
-        raise BadResponseError.new(resp) if resp.code > 399
-
         [url, resp]
       end
     end
@@ -228,7 +215,6 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
     def update_urls(new_urls)
       # Normalize URLs
       new_urls = new_urls.map(&method(:normalize_url))
-
 
       @state_mutex.synchronize do
         # Add new connections

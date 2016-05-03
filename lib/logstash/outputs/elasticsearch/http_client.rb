@@ -31,16 +31,12 @@ module LogStash; module Outputs; class ElasticSearch;
     end
 
     def bulk(actions)
-      non_threadsafe_bulk(actions)
-    end
-
-    def non_threadsafe_bulk(actions)
       return if actions.empty?
       bulk_body = actions.collect do |action, args, source|
         args, source = update_action_builder(args, source) if action == 'update'
 
         if source && action != 'delete'
-          next [ { action => args.merge({ :data => source }) } ]
+          next [ { action => args }, source ]
         else
           next { action => args }
         end
@@ -176,13 +172,7 @@ module LogStash; module Outputs; class ElasticSearch;
 
     def template_exists?(name)
       url, response = @pool.head("/_template/#{name}")
-      true
-    rescue LogStash::Outputs::ElasticSearch::HttpClient::Pool::BadResponseError => e
-      if e.code == 404
-        false
-      else
-        raise e
-      end
+      response.code >= 200 && response.code <= 299
     end
 
     def template_put(name, template)

@@ -6,15 +6,12 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
 
     def initialize(logger, options)
       @logger = logger
-      build_client(options || {})
-    end
+      @options = options || {}
 
-    # Should just be run once at startup
-    def build_client(options={})
-      client_options = options[:transport_options] || {}
-      client_options[:ssl] = options[:ssl] || {}
+      client_options = @options[:transport_options] || {}
+      client_options[:ssl] = @options[:ssl] || {}
 
-      @request_options = options[:headers] ? {:headers => options[:headers]} : {}
+      @request_options = @options[:headers] ? {:headers => @options[:headers]} : {}
       @manticore = ::Manticore::Client.new(client_options)
     end
 
@@ -51,7 +48,7 @@ module LogStash; module Outputs; class ElasticSearch; class HttpClient;
     end
 
     def host_unreachable_exceptions
-      [::Manticore::Timeout,::Manticore::SocketException, ::Manticore::ClientProtocolException, ::Manticore::ResolutionFailure]
+      [::Manticore::Timeout,::Manticore::SocketException, ::Manticore::ClientProtocolException, ::Manticore::ResolutionFailure, Manticore::SocketTimeout]
     end
   end
 end; end; end; end

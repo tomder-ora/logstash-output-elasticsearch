@@ -92,9 +92,7 @@ module LogStash; module Outputs; class ElasticSearch;
     end
 
     def submit(actions)
-      es_actions = actions.map { |a, doc, event| [a, doc, event.to_hash]}
-
-      bulk_response = safe_bulk(es_actions,actions)
+      bulk_response = safe_bulk(actions)
 
       # If there are no errors, we're done here!
       return unless bulk_response["errors"]
@@ -164,12 +162,13 @@ module LogStash; module Outputs; class ElasticSearch;
     end
 
     # Rescue retryable errors during bulk submission
-    def safe_bulk(es_actions,actions)
+    def safe_bulk(actions)
       sleep_interval = @retry_initial_interval
       begin
+        es_actions = actions.map {|action_type, params, event| [action_type, params, event.to_hash]}
         url, response = @client.bulk(es_actions)
         response
-      rescue Manticore::SocketException, Manticore::SocketTimeout => e
+      rescue ::LogStash::Outputs::ElasticSearch::HttpClient::Pool::HostUnreachableError
         # If we can't even connect to the server let's just print out the URL (:hosts is actually a URL)
         # and let the user sort it out from there
         @logger.error(

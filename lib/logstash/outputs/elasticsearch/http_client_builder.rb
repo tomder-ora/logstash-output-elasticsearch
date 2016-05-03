@@ -13,7 +13,7 @@ module LogStash; module Outputs; class ElasticSearch;
 
       if params["sniffing"]
         common_options[:sniffing] = true
-        common_options[:sniffer_delay] = params["sniffing__delay"]
+        common_options[:sniffer_delay] = params["sniffing_delay"]
       end
 
       common_options[:timeout] = params["timeout"] if params["timeout"]
